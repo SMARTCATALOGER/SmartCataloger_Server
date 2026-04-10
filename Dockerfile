@@ -4,7 +4,7 @@ FROM php:8.2-apache
 # 2. تحديث النظام وتنزيل مكتبة YAZ الأساسية لبروتوكول Z39.50
 RUN apt-get update && apt-get install -y \
     yaz \
-    libyaz5-dev \
+    libyaz-dev \
     libcurl4-openssl-dev \
     && pecl install yaz \
     && docker-php-ext-enable yaz
