@@ -1,7 +1,6 @@
-# 1. استخدام نسخة رسمية من PHP مع سيرفر Apache
-FROM php:8.2-apache
+FROM php:8.2-cli
 
-# 2. تحديث النظام وتنزيل مكتبة YAZ الأساسية لبروتوكول Z39.50
+# تنصيب المكتبات الأساسية لـ YAZ
 RUN apt-get update && apt-get install -y \
     yaz \
     libyaz-dev \
@@ -9,17 +8,13 @@ RUN apt-get update && apt-get install -y \
     && pecl install yaz \
     && docker-php-ext-enable yaz
 
-# 3. تفعيل بعض الإضافات المهمة للـ API والاتصالات
-RUN docker-php-ext-install pdo pdo_mysql curl
+# تنصيب إضافات PHP الضرورية
+RUN docker-php-ext-install curl
 
-# 4. تفعيل وضع إعادة كتابة الروابط في السيرفر
-RUN a2enmod rewrite
+# نسخ الملفات
+COPY . /var/www/html
+WORKDIR /var/www/html
 
-# 5. نسخ ملفات مشروعنا (api.php) إلى المجلد الرئيسي للسيرفر
-COPY . /var/www/html/
-
-# 6. إعطاء الصلاحيات الصحيحة للملفات حتى لا تحدث أخطاء
-RUN chown -R www-data:www-data /var/www/html/
-
-# 7. فتح المنفذ 80 للإنترنت الخارجي
+# تشغيل سيرفر PHP المدمج على منفذ 80
 EXPOSE 80
+CMD ["php", "-S", "0.0.0.0:80", "index.php"]
