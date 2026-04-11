@@ -158,9 +158,26 @@ if ($action == 'save') {
     exit;
 }
 
-// دالة مساعدة لاستخراج البيانات من نصوص MARC الخام (خاصة بـ Z39.50)
+// ==========================================
+// دالة احترافية لاستخراج وتنظيف البيانات من نصوص MARC الخام (خاصة بـ Z39.50)
+// ==========================================
 function parse_marc($raw, $tag) {
-    if (preg_match('/\$' . $tag . '(.*?)\$/s', $raw, $matches)) return trim($matches[1]);
+    // نبحث عن السطر اللي يبدأ برقم التاج (مثلاً 245)
+    if (preg_match('/^' . $tag . '\s+(.*)$/m', $raw, $matches)) {
+        $line = $matches[1];
+        // نفصل النص بناءً على علامة الحقول الفرعية $
+        $parts = explode('$', $line);
+        if (count($parts) > 1) {
+            array_shift($parts); // نحذف الجزء الأول (المؤشرات Indicators)
+            $clean_text = '';
+            foreach ($parts as $part) {
+                // نأخذ النص ونتجاهل أول حرف (اللي هو رمز الحقل الفرعي a, b, c)
+                $clean_text .= substr($part, 1) . ' '; 
+            }
+            // ننظف الفوارز والنقاط الزائدة من نهاية النص
+            return trim($clean_text, " /:,."); 
+        }
+    }
     return null;
 }
 ?>
