@@ -20,7 +20,7 @@ if ($action == 'search') {
     $all_results = [];
     $title_encoded = urlencode($title);
 
-    // --- المصدر الأول: Z39.50 (مكتبة الكونغرس وجامعة أكسفورد) ---
+    // --- المصدر الأول: Z39.50 (الكونغرس وأكسفورد) ---
     $z_sources = [
         "مكتبة الكونغرس (LOC)" => ["host" => "lx2.loc.gov:210/LCDB", "syntax" => "USMARC"],
         "جامعة أكسفورد" => ["host" => "library.ox.ac.uk:210/44OXF_INST", "syntax" => "USMARC"]
@@ -31,7 +31,7 @@ if ($action == 'search') {
             $conn = yaz_connect($info['host']);
             if ($conn) {
                 yaz_syntax($conn, $info['syntax']);
-                yaz_range($conn, 1, 2); // سحب أول نتيجتين فقط للسرعة
+                yaz_range($conn, 1, 2); 
                 yaz_search($conn, "rpn", '@attr 1=4 "' . $title . '"');
                 yaz_wait();
                 
@@ -39,15 +39,16 @@ if ($action == 'search') {
                 for ($i = 1; $i <= $hits && $i <= 2; $i++) {
                     $rec = yaz_record($conn, $i, "string");
                     if ($rec) {
+                        // سحب **كل** حقول المارك بدون استثناء
+                        $full_marc_array = parse_all_marc_fields($rec);
+                        
                         $all_results[] = [
-                            "title" => parse_marc($rec, '245') ?: "عنوان غير معروف",
-                            "author" => parse_marc($rec, '100') ?: "مؤلف غير معروف",
+                            // تنظيف العنوان والمؤلف للواجهة الرئيسية السريعة
+                            "title" => clean_marc_for_display($full_marc_array, '245') ?: "عنوان غير معروف",
+                            "author" => clean_marc_for_display($full_marc_array, '100') ?: (clean_marc_for_display($full_marc_array, '111') ?: "مؤلف غير معروف"),
                             "source" => $name,
-                            "marc_tags" => [
-                                "100" => parse_marc($rec, '100') ?: "مؤلف غير معروف",
-                                "245" => parse_marc($rec, '245') ?: "عنوان غير معروف",
-                                "260" => parse_marc($rec, '260') ?: "غير محدد"
-                            ]
+                            // إرسال التسجيلة كاملة بكل حقولها
+                            "marc_tags" => $full_marc_array
                         ];
                     }
                 }
@@ -62,7 +63,7 @@ if ($action == 'search') {
     if ($ba_xml) {
         $count = 0;
         foreach ($ba_xml->ListRecords->record as $record) {
-            if ($count >= 2) break; // نتيجتين فقط
+            if ($count >= 2) break;
             $metadata = $record->metadata->children('oai_dc', true)->children('dc', true);
             if (stripos($metadata->title, $title) !== false) {
                 $all_results[] = [
@@ -70,9 +71,10 @@ if ($action == 'search') {
                     "author" => (string)$metadata->creator ?: "مؤلف غير معروف",
                     "source" => "مكتبة الإسكندرية",
                     "marc_tags" => [
-                        "100" => (string)$metadata->creator ?: "مؤلف غير معروف",
+                        "100" => (string)$metadata->creator,
                         "245" => (string)$metadata->title,
-                        "260" => (string)$metadata->date ?: "غير محدد"
+                        "260" => (string)$metadata->date,
+                        "650" => (string)$metadata->subject
                     ]
                 ];
                 $count++;
@@ -82,7 +84,6 @@ if ($action == 'search') {
 
     // --- المصدر الثالث: Open Library ---
     $url_ol = "https://openlibrary.org/search.json?title=" . $title_encoded . "&limit=2";
-    // استخدمنا @ لتجاهل الأخطاء إذا السيرفر الخارجي تأخر
     $response_ol = @file_get_contents($url_ol);
     if ($response_ol) {
         $data_ol = json_decode($response_ol, true);
@@ -94,10 +95,12 @@ if ($action == 'search') {
                     "author" => $author,
                     "source" => "Open Library",
                     "marc_tags" => [
+                        "020" => isset($book['isbn']) ? $book['isbn'][0] : "غير متوفر",
+                        "082" => isset($book['ddc']) ? $book['ddc'][0] : "غير متوفر",
                         "100" => $author,
                         "245" => $book['title'],
                         "260" => isset($book['first_publish_year']) ? $book['first_publish_year'] : "غير محدد",
-                        "082" => isset($book['ddc']) ? $book['ddc'][0] : "غير متوفر"
+                        "650" => isset($book['subject']) ? implode(" | ", array_slice($book['subject'], 0, 3)) : "غير متوفر"
                     ]
                 ];
             }
@@ -118,17 +121,18 @@ if ($action == 'search') {
                     "author" => $author,
                     "source" => "Google Books",
                     "marc_tags" => [
+                        "020" => isset($book['industryIdentifiers']) ? $book['industryIdentifiers'][0]['identifier'] : "غير متوفر",
                         "100" => $author,
                         "245" => isset($book['title']) ? $book['title'] : "بدون عنوان",
                         "260" => isset($book['publishedDate']) ? $book['publishedDate'] : "غير محدد",
-                        "300" => isset($book['pageCount']) ? $book['pageCount'] . " صفحة" : "غير محدد"
+                        "300" => isset($book['pageCount']) ? $book['pageCount'] . " p." : "غير محدد",
+                        "650" => isset($book['categories']) ? implode(" | ", $book['categories']) : "غير متوفر"
                     ]
                 ];
             }
         }
     }
 
-    // إرسال النتيجة المجمعة كـ JSON
     echo json_encode([
         "status" => count($all_results) > 0 ? "success" : "no_results",
         "search_query" => $title,
@@ -139,7 +143,7 @@ if ($action == 'search') {
 }
 
 // ==========================================
-// 2. قسم حفظ التسجيلات (بانتظار قاعدة البيانات)
+// 2. قسم حفظ التسجيلات 
 // ==========================================
 if ($action == 'save') {
     $json_input = file_get_contents('php://input');
@@ -159,25 +163,45 @@ if ($action == 'save') {
 }
 
 // ==========================================
-// دالة احترافية لاستخراج وتنظيف البيانات من نصوص MARC الخام (خاصة بـ Z39.50)
+// الدوال المساعدة لمعالجة MARC
 // ==========================================
-function parse_marc($raw, $tag) {
-    // نبحث عن السطر اللي يبدأ برقم التاج (مثلاً 245)
-    if (preg_match('/^' . $tag . '\s+(.*)$/m', $raw, $matches)) {
-        $line = $matches[1];
-        // نفصل النص بناءً على علامة الحقول الفرعية $
-        $parts = explode('$', $line);
-        if (count($parts) > 1) {
-            array_shift($parts); // نحذف الجزء الأول (المؤشرات Indicators)
-            $clean_text = '';
-            foreach ($parts as $part) {
-                // نأخذ النص ونتجاهل أول حرف (اللي هو رمز الحقل الفرعي a, b, c)
-                $clean_text .= substr($part, 1) . ' '; 
+
+// 1. سحب **كل** الحقول من التسجيلة ووضعها في مصفوفة
+function parse_all_marc_fields($raw) {
+    $tags = [];
+    $lines = explode("\n", $raw);
+    foreach ($lines as $line) {
+        if (preg_match('/^(\d{3})\s+(.*)$/', trim($line), $matches)) {
+            $tag = $matches[1];
+            $content = trim($matches[2]);
+            
+            // إذا كان الحقل مكرر (مثل 650 رؤوس الموضوعات)، نحوله إلى مصفوفة
+            if (isset($tags[$tag])) {
+                if (!is_array($tags[$tag])) {
+                    $tags[$tag] = [$tags[$tag]];
+                }
+                $tags[$tag][] = $content;
+            } else {
+                $tags[$tag] = $content;
             }
-            // ننظف الفوارز والنقاط الزائدة من نهاية النص
-            return trim($clean_text, " /:,."); 
         }
     }
-    return null;
+    return $tags;
+}
+
+// 2. تنظيف حقل معين (للعرض السريع في الواجهة)
+function clean_marc_for_display($marc_array, $tag) {
+    if (!isset($marc_array[$tag])) return null;
+    $val = is_array($marc_array[$tag]) ? $marc_array[$tag][0] : $marc_array[$tag];
+    
+    // إزالة المؤشرات والحقول الفرعية $a $c الخ
+    $parts = explode('$', $val);
+    if (count($parts) > 1) {
+        array_shift($parts); 
+        $clean = '';
+        foreach($parts as $p) $clean .= substr($p, 1) . ' ';
+        return trim($clean, " /:,.");
+    }
+    return $val;
 }
 ?>
