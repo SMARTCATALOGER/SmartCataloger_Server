@@ -7,7 +7,7 @@ header('Content-Type: application/json; charset=utf-8');
 $action = isset($_GET['action']) ? $_GET['action'] : 'search';
 
 // ==========================================
-// 1. قسم البحث الشامل (Z39.50 + OAI + APIs)
+// 1. قسم البحث الشامل (SRU + OAI + APIs)
 // ==========================================
 if ($action == 'search') {
     $title = isset($_GET['title']) ? trim($_GET['title']) : '';
@@ -20,49 +20,54 @@ if ($action == 'search') {
     $all_results = [];
     $title_encoded = urlencode($title);
 
-// --- المصدر الأول: بروتوكول SRU الحديث (مكتبة الكونغرس) ---
-    // نستخدم لغة الاستعلام CQL للبحث عن العنوان
-    $sru_url = "http://lx2.loc.gov:210/LCDB?operation=searchRetrieve&version=1.1&query=bath.title=%22" . $title_encoded . "%22&maximumRecords=2";
-    
-    // سحب البيانات بصيغة XML
-    $sru_response = @file_get_contents($sru_url);
-    
+    // --- المصدر الأول: بروتوكول SRU الحديث (مكتبة الكونغرس) بطريقة مضادة للأخطاء ---
+    $sru_url = "http://lx2.loc.gov:210/lcdb?version=1.1&operation=searchRetrieve&maximumRecords=2&query=cql.anywhere=%22" . $title_encoded . "%22";
+
+    $ch_sru = curl_init();
+    curl_setopt($ch_sru, CURLOPT_URL, $sru_url);
+    curl_setopt($ch_sru, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch_sru, CURLOPT_TIMEOUT, 10);
+    $sru_response = curl_exec($ch_sru);
+    curl_close($ch_sru);
+
     if ($sru_response) {
-        $xml = @simplexml_load_string($sru_response);
-        if ($xml) {
-            // تسجيل مسارات الـ XML حتى نكدر نقرأ حقول المارك
-            $xml->registerXPathNamespace('srw', 'http://www.loc.gov/zing/srw/');
-            $xml->registerXPathNamespace('marc', 'http://www.loc.gov/MARC21/slim');
-            
-            // سحب كل التسجيلات (Records)
-            $records = $xml->xpath('//srw:record/srw:recordData/marc:record');
-            
-            if ($records) {
-                foreach ($records as $record) {
-                    $marc_tags = [];
-                    $book_title = "عنوان غير معروف";
-                    $book_author = "مؤلف غير معروف";
-                    
-                    // 1. سحب الحقول الثابتة (Control Fields) مثل 001 و 008
-                    foreach ($record->xpath('marc:controlfield') as $cf) {
+        // تنظيف ملف XML من البادئات (Namespaces) المزعجة لضمان القراءة الصحيحة
+        $clean_xml = str_replace(['zs:', 'srw:', 'marc:'], '', $sru_response);
+        $clean_xml = preg_replace('/xmlns[^=]*="[^"]*"/i', '', $clean_xml);
+        
+        $xml = @simplexml_load_string($clean_xml);
+        
+        if ($xml && isset($xml->records->record)) {
+            foreach ($xml->records->record as $rec) {
+                $marc_tags = [];
+                $book_title = "عنوان غير معروف";
+                $book_author = "مؤلف غير معروف";
+                
+                $inner_record = $rec->recordData->record;
+                if (!$inner_record) continue;
+
+                // سحب الحقول الثابتة
+                if (isset($inner_record->controlfield)) {
+                    foreach ($inner_record->controlfield as $cf) {
                         $tag = (string)$cf['tag'];
                         $marc_tags[$tag] = (string)$cf;
                     }
-                    
-                    // 2. سحب الحقول المتغيرة (Data Fields) مثل 100, 245, 260
-                    foreach ($record->xpath('marc:datafield') as $df) {
+                }
+                
+                // سحب الحقول المتغيرة
+                if (isset($inner_record->datafield)) {
+                    foreach ($inner_record->datafield as $df) {
                         $tag = (string)$df['tag'];
                         $field_data = [];
                         
-                        // سحب الحقول الفرعية (Subfields) مثل $a, $b, $c
-                        foreach ($df->xpath('marc:subfield') as $sf) {
-                            $field_data[] = (string)$sf;
+                        if (isset($df->subfield)) {
+                            foreach ($df->subfield as $sf) {
+                                $field_data[] = (string)$sf;
+                            }
                         }
                         
-                        $full_text = implode(" ", $field_data);
-                        $full_text = trim($full_text, " /:,.");
+                        $full_text = trim(implode(" ", $field_data), " /:,.");
                         
-                        // إذا الحقل مكرر (مثل 650) نسويه مصفوفة
                         if (isset($marc_tags[$tag])) {
                             if (!is_array($marc_tags[$tag])) {
                                 $marc_tags[$tag] = [$marc_tags[$tag]];
@@ -72,18 +77,17 @@ if ($action == 'search') {
                             $marc_tags[$tag] = $full_text;
                         }
                         
-                        // التقاط العنوان والمؤلف للعرض السريع
                         if ($tag == '245') $book_title = $full_text;
-                        if ($tag == '100' || $tag == '111') $book_author = $full_text;
+                        if ($tag == '100' || $tag == '111' || $tag == '700') $book_author = $full_text;
                     }
-                    
-                    $all_results[] = [
-                        "title" => $book_title,
-                        "author" => $book_author,
-                        "source" => "مكتبة الكونغرس (SRU)",
-                        "marc_tags" => $marc_tags
-                    ];
                 }
+                
+                $all_results[] = [
+                    "title" => $book_title,
+                    "author" => $book_author,
+                    "source" => "مكتبة الكونغرس (SRU)",
+                    "marc_tags" => $marc_tags
+                ];
             }
         }
     }
@@ -206,7 +210,6 @@ function parse_all_marc_fields($raw) {
             $tag = $matches[1];
             $content = trim($matches[2]);
             
-            // إذا كان الحقل مكرر (مثل 650 رؤوس الموضوعات)، نحوله إلى مصفوفة
             if (isset($tags[$tag])) {
                 if (!is_array($tags[$tag])) {
                     $tags[$tag] = [$tags[$tag]];
@@ -225,7 +228,6 @@ function clean_marc_for_display($marc_array, $tag) {
     if (!isset($marc_array[$tag])) return null;
     $val = is_array($marc_array[$tag]) ? $marc_array[$tag][0] : $marc_array[$tag];
     
-    // إزالة المؤشرات والحقول الفرعية $a $c الخ
     $parts = explode('$', $val);
     if (count($parts) > 1) {
         array_shift($parts); 
