@@ -26,7 +26,7 @@ if ($action == 'search') {
     // =========================================================================
    // --- المصدر الأول: بروتوكول SRU (مكتبة جامعة الموصل المركزية) ---
     // قمنا بدمج الدومين الرسمي مع مسار SRU الخاص بنظام Koha
-    $sru_url = "https://centrallibrary.uomosul.edu.iq:8000/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=10&query=cql.anywhere=%22" . $title_encoded . "%22";
+    $sru_url = "https://centrallibrary.uomosul.edu.iq:8080/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=10&query=cql.anywhere=%22" . $title_encoded . "%22";
 
     $ch_sru = curl_init();
     curl_setopt($ch_sru, CURLOPT_URL, $sru_url);
