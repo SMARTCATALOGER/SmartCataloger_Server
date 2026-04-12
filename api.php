@@ -20,39 +20,70 @@ if ($action == 'search') {
     $all_results = [];
     $title_encoded = urlencode($title);
 
-    // --- المصدر الأول: Z39.50 (الكونغرس وأكسفورد) ---
-    $z_sources = [
-        "مكتبة الكونغرس (LOC)" => ["host" => "lx2.loc.gov:210/LCDB", "syntax" => "USMARC"],
-        "جامعة أكسفورد" => ["host" => "library.ox.ac.uk:210/44OXF_INST", "syntax" => "USMARC"]
-    ];
-
-    if (function_exists('yaz_connect')) {
-        foreach ($z_sources as $name => $info) {
-            $conn = yaz_connect($info['host']);
-            if ($conn) {
-                yaz_syntax($conn, $info['syntax']);
-                yaz_range($conn, 1, 2); 
-                yaz_search($conn, "rpn", '@attr 1=4 "' . $title . '"');
-                yaz_wait();
-                
-                $hits = yaz_hits($conn);
-                for ($i = 1; $i <= $hits && $i <= 2; $i++) {
-                    $rec = yaz_record($conn, $i, "string");
-                    if ($rec) {
-                        // سحب **كل** حقول المارك بدون استثناء
-                        $full_marc_array = parse_all_marc_fields($rec);
-                        
-                        $all_results[] = [
-                            // تنظيف العنوان والمؤلف للواجهة الرئيسية السريعة
-                            "title" => clean_marc_for_display($full_marc_array, '245') ?: "عنوان غير معروف",
-                            "author" => clean_marc_for_display($full_marc_array, '100') ?: (clean_marc_for_display($full_marc_array, '111') ?: "مؤلف غير معروف"),
-                            "source" => $name,
-                            // إرسال التسجيلة كاملة بكل حقولها
-                            "marc_tags" => $full_marc_array
-                        ];
+// --- المصدر الأول: بروتوكول SRU الحديث (مكتبة الكونغرس) ---
+    // نستخدم لغة الاستعلام CQL للبحث عن العنوان
+    $sru_url = "http://lx2.loc.gov:210/LCDB?operation=searchRetrieve&version=1.1&query=bath.title=%22" . $title_encoded . "%22&maximumRecords=2";
+    
+    // سحب البيانات بصيغة XML
+    $sru_response = @file_get_contents($sru_url);
+    
+    if ($sru_response) {
+        $xml = @simplexml_load_string($sru_response);
+        if ($xml) {
+            // تسجيل مسارات الـ XML حتى نكدر نقرأ حقول المارك
+            $xml->registerXPathNamespace('srw', 'http://www.loc.gov/zing/srw/');
+            $xml->registerXPathNamespace('marc', 'http://www.loc.gov/MARC21/slim');
+            
+            // سحب كل التسجيلات (Records)
+            $records = $xml->xpath('//srw:record/srw:recordData/marc:record');
+            
+            if ($records) {
+                foreach ($records as $record) {
+                    $marc_tags = [];
+                    $book_title = "عنوان غير معروف";
+                    $book_author = "مؤلف غير معروف";
+                    
+                    // 1. سحب الحقول الثابتة (Control Fields) مثل 001 و 008
+                    foreach ($record->xpath('marc:controlfield') as $cf) {
+                        $tag = (string)$cf['tag'];
+                        $marc_tags[$tag] = (string)$cf;
                     }
+                    
+                    // 2. سحب الحقول المتغيرة (Data Fields) مثل 100, 245, 260
+                    foreach ($record->xpath('marc:datafield') as $df) {
+                        $tag = (string)$df['tag'];
+                        $field_data = [];
+                        
+                        // سحب الحقول الفرعية (Subfields) مثل $a, $b, $c
+                        foreach ($df->xpath('marc:subfield') as $sf) {
+                            $field_data[] = (string)$sf;
+                        }
+                        
+                        $full_text = implode(" ", $field_data);
+                        $full_text = trim($full_text, " /:,.");
+                        
+                        // إذا الحقل مكرر (مثل 650) نسويه مصفوفة
+                        if (isset($marc_tags[$tag])) {
+                            if (!is_array($marc_tags[$tag])) {
+                                $marc_tags[$tag] = [$marc_tags[$tag]];
+                            }
+                            $marc_tags[$tag][] = $full_text;
+                        } else {
+                            $marc_tags[$tag] = $full_text;
+                        }
+                        
+                        // التقاط العنوان والمؤلف للعرض السريع
+                        if ($tag == '245') $book_title = $full_text;
+                        if ($tag == '100' || $tag == '111') $book_author = $full_text;
+                    }
+                    
+                    $all_results[] = [
+                        "title" => $book_title,
+                        "author" => $book_author,
+                        "source" => "مكتبة الكونغرس (SRU)",
+                        "marc_tags" => $marc_tags
+                    ];
                 }
-                yaz_close($conn);
             }
         }
     }
