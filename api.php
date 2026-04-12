@@ -1,14 +1,11 @@
 <?php
-// السماح لتطبيق الفلاتر (الموبايل) بالاتصال بدون قيود أمنية (CORS)
+// السماح لتطبيق الفلاتر (الموبايل) بالاتصال بدون قيود أمنية
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST');
 header('Content-Type: application/json; charset=utf-8');
 
 $action = isset($_GET['action']) ? $_GET['action'] : 'search';
 
-// ==========================================
-// 1. قسم البحث المخصص (جامعة الموصل فقط)
-// ==========================================
 if ($action == 'search') {
     $title = isset($_GET['title']) ? trim($_GET['title']) : '';
 
@@ -18,89 +15,55 @@ if ($action == 'search') {
     }
 
     $all_results = [];
-    $title_encoded = urlencode($title);
+    
+    // ==========================================
+    // المصدر: مكتبة جامعة الموصل المركزية (طريقة الاختراق - Web Scraping)
+    // ==========================================
+    // نتنكر كطالب حقيقي ونستخدم رابط البحث العادي (OPAC)
+    $search_url = "http://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?q=" . urlencode($title);
 
-    // =========================================================================
-    // 🔴 تنبيه هام: استبدل [MOSUL_LIBRARY_IP] بالرابط الفعلي الذي ستحصل عليه من جامعتك
-    // مثال إذا أعطوك رابط:  "http://192.168.1.50/cgi-bin/koha/sru..."
-    // =========================================================================
-   // --- المصدر الأول: بروتوكول SRU (مكتبة جامعة الموصل المركزية) ---
-    // قمنا بدمج الدومين الرسمي مع مسار SRU الخاص بنظام Koha
-    $sru_url = "https://centrallibrary.uomosul.edu.iq:8080/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=10&query=cql.anywhere=%22" . $title_encoded . "%22";
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $search_url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    // التنكر كمتصفح جوجل كروم لتجاوز أي حماية
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    $html = curl_exec($ch);
+    curl_close($ch);
 
-    $ch_sru = curl_init();
-    curl_setopt($ch_sru, CURLOPT_URL, $sru_url);
-    curl_setopt($ch_sru, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch_sru, CURLOPT_SSL_VERIFYPEER, false); 
-    curl_setopt($ch_sru, CURLOPT_TIMEOUT, 15);
-    $sru_response = curl_exec($ch_sru);
-    curl_close($ch_sru);
-
-    if ($sru_response) {
-        // تنظيف ملف XML من البادئات لضمان القراءة السليمة
-        $clean_xml = str_replace(['zs:', 'srw:', 'marc:'], '', $sru_response);
-        $clean_xml = preg_replace('/xmlns[^=]*="[^"]*"/i', '', $clean_xml);
+    // إذا نجحنا بسحب صفحة الـ HTML من المكتبة
+    if ($html && stripos($html, 'class="title"') !== false) {
+        // سحب العناوين (Titles) باستخدام التعابير القياسية (Regex)
+        preg_match_all('/<a class="title"[^>]*>(.*?)<\/a>/is', $html, $titles);
         
-        $xml = @simplexml_load_string($clean_xml);
+        // سحب أسماء المؤلفين (Authors)
+        preg_match_all('/<span class="results_summary author">.*?<a[^>]*>(.*?)<\/a>/is', $html, $authors);
         
-        if ($xml && isset($xml->records->record)) {
-            foreach ($xml->records->record as $rec) {
-                $marc_tags = [];
-                $book_title = "عنوان غير معروف";
-                $book_author = "مؤلف غير معروف";
-                
-                $inner_record = $rec->recordData->record;
-                if (!$inner_record) continue;
+        // سحب سنة النشر (Publisher Date)
+        preg_match_all('/<span class="publisherdate">(.*?)<\/span>/is', $html, $dates);
 
-                // سحب الحقول الثابتة
-                if (isset($inner_record->controlfield)) {
-                    foreach ($inner_record->controlfield as $cf) {
-                        $tag = (string)$cf['tag'];
-                        $marc_tags[$tag] = (string)$cf;
-                    }
-                }
-                
-                // سحب الحقول المتغيرة (مع الاحتفاظ بالدولارات $a, $b, $c للتفاصيل الدقيقة)
-                if (isset($inner_record->datafield)) {
-                    foreach ($inner_record->datafield as $df) {
-                        $tag = (string)$df['tag'];
-                        $field_data = "";
-                        
-                        if (isset($df->subfield)) {
-                            foreach ($df->subfield as $sf) {
-                                // سحب رمز الحقل الفرعي وإضافة علامة $
-                                $code = (string)$sf['code'];
-                                $val = (string)$sf;
-                                $field_data .= "\$$code $val  ";
-                            }
-                        }
-                        
-                        $full_text = trim($field_data);
-                        
-                        // ترتيب الحقول المكررة (مثل 650)
-                        if (isset($marc_tags[$tag])) {
-                            if (!is_array($marc_tags[$tag])) {
-                                $marc_tags[$tag] = [$marc_tags[$tag]];
-                            }
-                            $marc_tags[$tag][] = $full_text;
-                        } else {
-                            $marc_tags[$tag] = $full_text;
-                        }
-                        
-                        // تنظيف العنوان والمؤلف للواجهة الرئيسية فقط (حذف الـ $)
-                        $clean_for_ui = trim(preg_replace('/\$[a-z0-9]\s*/', '', $full_text), " /:,.");
-                        if ($tag == '245') $book_title = $clean_for_ui;
-                        if ($tag == '100' || $tag == '111' || $tag == '700') $book_author = $clean_for_ui;
-                    }
-                }
-                
-                $all_results[] = [
-                    "title" => $book_title,
-                    "author" => $book_author,
-                    "source" => "مكتبة جامعة الموصل",
-                    "marc_tags" => $marc_tags
-                ];
-            }
+        // نأخذ أول 5 نتائج حتى يكون التطبيق سريع
+        $limit = min(count($titles[1]), 5); 
+
+        for ($i = 0; $i < $limit; $i++) {
+            $book_title = trim(strip_tags($titles[1][$i]));
+            $book_author = isset($authors[1][$i]) ? trim(strip_tags($authors[1][$i])) : "مؤلف غير معروف";
+            $book_pub_date = isset($dates[1][$i]) ? trim(strip_tags($dates[1][$i])) : "غير محدد";
+
+            // بما إننا نسحب من الشاشة، ما راح نلكى حقول المارك العميقة، فراح نصنعها برمجياً لعيون الفلاتر
+            $all_results[] = [
+                "title" => $book_title,
+                "author" => $book_author,
+                "source" => "جامعة الموصل (Scraping)",
+                "marc_tags" => [
+                    "100" => "\$a " . $book_author,
+                    "245" => "\$a " . $book_title,
+                    "260" => "\$c " . $book_pub_date,
+                    "500" => "\$a تم سحب هذه التسجيلة باستخدام تقنية تجريف الويب (Web Scraping) من واجهة النظام."
+                ]
+            ];
         }
     }
 
@@ -114,20 +77,20 @@ if ($action == 'search') {
 }
 
 // ==========================================
-// 2. قسم حفظ التسجيلات 
+// 2. قسم حفظ التسجيلات
 // ==========================================
 if ($action == 'save') {
     $json_input = file_get_contents('php://input');
     $book_data = json_decode($json_input, true);
 
     if (!$book_data) {
-        echo json_encode(["status" => "error", "message" => "لم يتم استلام أي بيانات صالحة للحفظ."], JSON_UNESCAPED_UNICODE);
+        echo json_encode(["status" => "error", "message" => "لم يتم استلام أي بيانات صالحة."], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
     echo json_encode([
         "status" => "success",
-        "message" => "تم استقبال التسجيلة بنجاح. جاهز للربط مع MySQL.",
+        "message" => "تم الاستقبال.",
         "received_title" => $book_data['title'] ?? 'غير معروف'
     ], JSON_UNESCAPED_UNICODE);
     exit;
