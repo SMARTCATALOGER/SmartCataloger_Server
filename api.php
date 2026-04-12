@@ -20,18 +20,19 @@ if ($action == 'search') {
     $all_results = [];
     $title_encoded = urlencode($title);
 
-    // --- المصدر الأول: بروتوكول SRU الحديث (مكتبة الكونغرس) بطريقة مضادة للأخطاء ---
-    $sru_url = "http://lx2.loc.gov:210/lcdb?version=1.1&operation=searchRetrieve&maximumRecords=2&query=cql.anywhere=%22" . $title_encoded . "%22";
+    // --- المصدر الأول: مكتبة عربية (جامعة النجاح الوطنية - نظام Koha) عبر SRU ---
+    $sru_url = "https://maktaba.najah.edu/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=2&query=cql.anywhere=%22" . $title_encoded . "%22";
 
     $ch_sru = curl_init();
     curl_setopt($ch_sru, CURLOPT_URL, $sru_url);
     curl_setopt($ch_sru, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch_sru, CURLOPT_SSL_VERIFYPEER, false); // لتجاوز مشاكل شهادات الأمان
     curl_setopt($ch_sru, CURLOPT_TIMEOUT, 10);
     $sru_response = curl_exec($ch_sru);
     curl_close($ch_sru);
 
     if ($sru_response) {
-        // تنظيف ملف XML من البادئات (Namespaces) المزعجة لضمان القراءة الصحيحة
+        // تنظيف ملف XML من البادئات لضمان القراءة
         $clean_xml = str_replace(['zs:', 'srw:', 'marc:'], '', $sru_response);
         $clean_xml = preg_replace('/xmlns[^=]*="[^"]*"/i', '', $clean_xml);
         
@@ -54,19 +55,22 @@ if ($action == 'search') {
                     }
                 }
                 
-                // سحب الحقول المتغيرة
+                // سحب الحقول المتغيرة (مع استرجاع رموز الـ Subfields)
                 if (isset($inner_record->datafield)) {
                     foreach ($inner_record->datafield as $df) {
                         $tag = (string)$df['tag'];
-                        $field_data = [];
+                        $field_data = "";
                         
                         if (isset($df->subfield)) {
                             foreach ($df->subfield as $sf) {
-                                $field_data[] = (string)$sf;
+                                // سحب رمز الحقل الفرعي (a, b, c) وإضافة علامة $
+                                $code = (string)$sf['code'];
+                                $val = (string)$sf;
+                                $field_data .= "\$$code $val  ";
                             }
                         }
                         
-                        $full_text = trim(implode(" ", $field_data), " /:,.");
+                        $full_text = trim($field_data);
                         
                         if (isset($marc_tags[$tag])) {
                             if (!is_array($marc_tags[$tag])) {
@@ -77,15 +81,17 @@ if ($action == 'search') {
                             $marc_tags[$tag] = $full_text;
                         }
                         
-                        if ($tag == '245') $book_title = $full_text;
-                        if ($tag == '100' || $tag == '111' || $tag == '700') $book_author = $full_text;
+                        // تنظيف العنوان والمؤلف من علامة الـ $ لأغراض العرض في واجهة الموبايل فقط
+                        $clean_for_ui = trim(preg_replace('/\$[a-z0-9]\s*/', '', $full_text), " /:,.");
+                        if ($tag == '245') $book_title = $clean_for_ui;
+                        if ($tag == '100' || $tag == '111' || $tag == '700') $book_author = $clean_for_ui;
                     }
                 }
                 
                 $all_results[] = [
                     "title" => $book_title,
                     "author" => $book_author,
-                    "source" => "مكتبة الكونغرس (SRU)",
+                    "source" => "جامعة النجاح (Koha SRU)",
                     "marc_tags" => $marc_tags
                 ];
             }
@@ -130,12 +136,12 @@ if ($action == 'search') {
                     "author" => $author,
                     "source" => "Open Library",
                     "marc_tags" => [
-                        "020" => isset($book['isbn']) ? $book['isbn'][0] : "غير متوفر",
-                        "082" => isset($book['ddc']) ? $book['ddc'][0] : "غير متوفر",
-                        "100" => $author,
-                        "245" => $book['title'],
-                        "260" => isset($book['first_publish_year']) ? $book['first_publish_year'] : "غير محدد",
-                        "650" => isset($book['subject']) ? implode(" | ", array_slice($book['subject'], 0, 3)) : "غير متوفر"
+                        "020" => isset($book['isbn']) ? '$a ' . $book['isbn'][0] : "غير متوفر",
+                        "082" => isset($book['ddc']) ? '$a ' . $book['ddc'][0] : "غير متوفر",
+                        "100" => '$a ' . $author,
+                        "245" => '$a ' . $book['title'],
+                        "260" => isset($book['first_publish_year']) ? '$c ' . $book['first_publish_year'] : "غير محدد",
+                        "650" => isset($book['subject']) ? '$a ' . implode(" | \$a ", array_slice($book['subject'], 0, 3)) : "غير متوفر"
                     ]
                 ];
             }
@@ -156,12 +162,12 @@ if ($action == 'search') {
                     "author" => $author,
                     "source" => "Google Books",
                     "marc_tags" => [
-                        "020" => isset($book['industryIdentifiers']) ? $book['industryIdentifiers'][0]['identifier'] : "غير متوفر",
-                        "100" => $author,
-                        "245" => isset($book['title']) ? $book['title'] : "بدون عنوان",
-                        "260" => isset($book['publishedDate']) ? $book['publishedDate'] : "غير محدد",
-                        "300" => isset($book['pageCount']) ? $book['pageCount'] . " p." : "غير محدد",
-                        "650" => isset($book['categories']) ? implode(" | ", $book['categories']) : "غير متوفر"
+                        "020" => isset($book['industryIdentifiers']) ? '$a ' . $book['industryIdentifiers'][0]['identifier'] : "غير متوفر",
+                        "100" => '$a ' . $author,
+                        "245" => isset($book['title']) ? '$a ' . $book['title'] : "بدون عنوان",
+                        "260" => isset($book['publishedDate']) ? '$c ' . $book['publishedDate'] : "غير محدد",
+                        "300" => isset($book['pageCount']) ? '$a ' . $book['pageCount'] . " p." : "غير محدد",
+                        "650" => isset($book['categories']) ? '$a ' . implode(" | \$a ", $book['categories']) : "غير متوفر"
                     ]
                 ];
             }
@@ -195,46 +201,5 @@ if ($action == 'save') {
         "received_title" => $book_data['title'] ?? 'غير معروف'
     ], JSON_UNESCAPED_UNICODE);
     exit;
-}
-
-// ==========================================
-// الدوال المساعدة لمعالجة MARC
-// ==========================================
-
-// 1. سحب **كل** الحقول من التسجيلة ووضعها في مصفوفة
-function parse_all_marc_fields($raw) {
-    $tags = [];
-    $lines = explode("\n", $raw);
-    foreach ($lines as $line) {
-        if (preg_match('/^(\d{3})\s+(.*)$/', trim($line), $matches)) {
-            $tag = $matches[1];
-            $content = trim($matches[2]);
-            
-            if (isset($tags[$tag])) {
-                if (!is_array($tags[$tag])) {
-                    $tags[$tag] = [$tags[$tag]];
-                }
-                $tags[$tag][] = $content;
-            } else {
-                $tags[$tag] = $content;
-            }
-        }
-    }
-    return $tags;
-}
-
-// 2. تنظيف حقل معين (للعرض السريع في الواجهة)
-function clean_marc_for_display($marc_array, $tag) {
-    if (!isset($marc_array[$tag])) return null;
-    $val = is_array($marc_array[$tag]) ? $marc_array[$tag][0] : $marc_array[$tag];
-    
-    $parts = explode('$', $val);
-    if (count($parts) > 1) {
-        array_shift($parts); 
-        $clean = '';
-        foreach($parts as $p) $clean .= substr($p, 1) . ' ';
-        return trim($clean, " /:,.");
-    }
-    return $val;
 }
 ?>
