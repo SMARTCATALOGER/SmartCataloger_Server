@@ -1,5 +1,5 @@
 <?php
-// السماح لتطبيق الفلاتر (الموبايل) بالاتصال بدون قيود أمنية
+// السماح لتطبيق الفلاتر (الموبايل) بالاتصال
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST');
 header('Content-Type: application/json; charset=utf-8');
@@ -15,53 +15,70 @@ if ($action == 'search') {
     }
 
     $all_results = [];
+    $title_encoded = urlencode($title);
     
     // ==========================================
-    // المصدر: مكتبة جامعة الموصل المركزية (طريقة الاختراق - Web Scraping)
+    // المصدر: مكتبة جامعة الموصل المركزية (النسخة الشبحية 👻)
     // ==========================================
-    // نتنكر كطالب حقيقي ونستخدم رابط البحث العادي (OPAC)
-    $search_url = "http://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?q=" . urlencode($title);
+    // استخدام بارامترات البحث الرسمية لنظام Koha
+    $search_url = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?idx=kw&q=" . $title_encoded;
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $search_url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    // التنكر كمتصفح جوجل كروم لتجاوز أي حماية
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'); 
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    
+    // التخفي كطالب حقيقي يتصفح من العراق لتجاوز حماية الجامعة
+    $headers = [
+        'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language: ar,en-US;q=0.7,en;q=0.3',
+        'Connection: keep-alive',
+        'Upgrade-Insecure-Requests: 1',
+        'Cache-Control: max-age=0'
+    ];
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+    
     $html = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    // إذا نجحنا بسحب صفحة الـ HTML من المكتبة
-    if ($html && stripos($html, 'class="title"') !== false) {
-        // سحب العناوين (Titles) باستخدام التعابير القياسية (Regex)
-        preg_match_all('/<a class="title"[^>]*>(.*?)<\/a>/is', $html, $titles);
+    // إذا تم جلب الصفحة بنجاح
+    if ($html && $http_code == 200) {
         
-        // سحب أسماء المؤلفين (Authors)
-        preg_match_all('/<span class="results_summary author">.*?<a[^>]*>(.*?)<\/a>/is', $html, $authors);
+        // استخدام DOMDocument لتحليل الـ HTML بطريقة احترافية
+        $dom = new DOMDocument();
+        // إخماد أخطاء الـ HTML غير القياسي
+        libxml_use_internal_errors(true);
+        // إجبار ترميز UTF-8 لقراءة اللغة العربية
+        @$dom->loadHTML('<?xml encoding="utf-8" ?>' . $html);
+        libxml_clear_errors();
         
-        // سحب سنة النشر (Publisher Date)
-        preg_match_all('/<span class="publisherdate">(.*?)<\/span>/is', $html, $dates);
+        $xpath = new DOMXPath($dom);
+        
+        // البحث عن العناوين في نظام Koha (عادة تكون داخل a tag يحمل كلاس title أو p-title)
+        $title_nodes = $xpath->query('//a[contains(@class, "title")]');
+        
+        // البحث عن المؤلفين
+        $author_nodes = $xpath->query('//span[contains(@class, "author")]/a | //a[contains(@class, "author")]');
 
-        // نأخذ أول 5 نتائج حتى يكون التطبيق سريع
-        $limit = min(count($titles[1]), 5); 
+        $limit = min($title_nodes->length, 5); // أخذ أول 5 نتائج
 
         for ($i = 0; $i < $limit; $i++) {
-            $book_title = trim(strip_tags($titles[1][$i]));
-            $book_author = isset($authors[1][$i]) ? trim(strip_tags($authors[1][$i])) : "مؤلف غير معروف";
-            $book_pub_date = isset($dates[1][$i]) ? trim(strip_tags($dates[1][$i])) : "غير محدد";
+            $book_title = trim($title_nodes->item($i)->textContent);
+            $book_author = ($i < $author_nodes->length) ? trim($author_nodes->item($i)->textContent) : "مؤلف غير معروف";
 
-            // بما إننا نسحب من الشاشة، ما راح نلكى حقول المارك العميقة، فراح نصنعها برمجياً لعيون الفلاتر
             $all_results[] = [
                 "title" => $book_title,
                 "author" => $book_author,
-                "source" => "جامعة الموصل (Scraping)",
+                "source" => "مكتبة جامعة الموصل (Koha)",
                 "marc_tags" => [
                     "100" => "\$a " . $book_author,
                     "245" => "\$a " . $book_title,
-                    "260" => "\$c " . $book_pub_date,
-                    "500" => "\$a تم سحب هذه التسجيلة باستخدام تقنية تجريف الويب (Web Scraping) من واجهة النظام."
+                    "500" => "\$a تم استخراج هذه التسجيلة بنجاح من الفهرس الآلي لجامعة الموصل."
                 ]
             ];
         }
@@ -71,6 +88,7 @@ if ($action == 'search') {
         "status" => count($all_results) > 0 ? "success" : "no_results",
         "search_query" => $title,
         "total_results" => count($all_results),
+        "debug_http_code" => $http_code, // ضفتلك هذا حتى نعرف السيرفر شديجاوب
         "data" => $all_results
     ], JSON_UNESCAPED_UNICODE);
     exit;
