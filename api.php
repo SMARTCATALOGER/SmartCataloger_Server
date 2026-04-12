@@ -18,9 +18,8 @@ if ($action == 'search') {
     $title_encoded = urlencode($title);
     
     // ==========================================
-    // المصدر: مكتبة جامعة الموصل المركزية (البحث الدقيق بالـ XPath)
+    // المصدر: مكتبة جامعة الموصل (الاختراق عبر الـ BiblioNumber) 🕵️‍♂️
     // ==========================================
-    // استخدمنا الرابط الأصلي والبارامترات اللي جبتها إنت بالضبط
     $search_url = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?idx=&q=" . $title_encoded . "&limit=&weight_search=1";
 
     $ch = curl_init();
@@ -29,7 +28,7 @@ if ($action == 'search') {
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     
-    // التخفي كمتصفح حقيقي لتجاوز الحماية
+    // التخفي كمتصفح لابتوب حقيقي
     $headers = [
         'Accept: text/html,application/xhtml+xml,application/xml',
         'Accept-Language: ar,en-US;q=0.7,en;q=0.3',
@@ -45,46 +44,59 @@ if ($action == 'search') {
     if ($html && $http_code == 200) {
         $dom = new DOMDocument();
         libxml_use_internal_errors(true);
-        // إجبار النظام على قراءة الحروف العربية (UTF-8)
         @$dom->loadHTML('<?xml encoding="utf-8" ?>' . $html);
         libxml_clear_errors();
         
         $xpath = new DOMXPath($dom);
         
-        // هنا سر الاختراق: بناءً على صورتك، راح نسحب كل خلية (td) تحتوي على كتاب
-        $book_nodes = $xpath->query('//td[contains(@class, "bibliocol")]');
+        // الصيد الثمين: نبحث عن الـ checkbox اللي جبته إنت
+        $checkboxes = $xpath->query('//input[@name="biblionumber"]');
         
         $count = 0;
-        foreach ($book_nodes as $node) {
-            if ($count >= 10) break; // نجيب أول 10 كتب بس للسرعة
+        foreach ($checkboxes as $checkbox) {
+            if ($count >= 10) break; // أول 10 نتائج
 
-            // 1. سحب العنوان والرابط (من داخل div اللي اسمه title_summary مثل ما بين بالصورة)
-            $title_node = $xpath->query('.//div[contains(@class, "title_summary")]//a', $node)->item(0);
-            if (!$title_node) continue; // إذا ماكو عنوان، اعبر على البعده
+            // استخراج الرقم السري للكتاب
+            $bib_num = $checkbox->getAttribute('value');
 
-            $book_title = trim($title_node->textContent);
-            $href = $title_node->getAttribute('href');
-            $full_link = "https://centrallibrary.uomosul.edu.iq" . (strpos($href, '/') === 0 ? $href : '/' . $href);
+            // نصعد لصف الجدول (tr) اللي بي هذا الكتاب حتى نسحب معلوماته
+            $row = $xpath->query('ancestor::tr', $checkbox)->item(0);
+            if (!$row) continue;
 
-            // 2. سحب المؤلف (من داخل span اللي اسمه author)
-            $author_node = $xpath->query('.//span[contains(@class, "author")]', $node)->item(0);
-            $book_author = $author_node ? trim(strip_tags($author_node->nodeValue)) : "مؤلف غير معروف";
-            // تنظيف اسم المؤلف من كلمات مثل (بواسطة، تأليف)
-            $book_author = trim(str_replace(['بواسطة', ':', '|'], '', $book_author));
+            // 1. سحب العنوان (بناءً على الصورة مالتك، العنوان موجود بـ div يحمل رقم الكتاب)
+            $title_node = $xpath->query('.//div[@id="title_summary_' . $bib_num . '"]//a', $row)->item(0);
+            
+            // خطة طوارئ: إذا ما لكى الـ div، يدور على أي رابط داخل العمود
+            if (!$title_node) {
+                $title_node = $xpath->query('.//td[contains(@class, "bibliocol")]//a', $row)->item(0);
+            }
 
-            // ترتيب البيانات للـ Flutter
-            $all_results[] = [
-                "title" => $book_title,
-                "author" => $book_author,
-                "source" => "مكتبة جامعة الموصل 📚",
-                "marc_tags" => [
-                    "100" => "\$a " . $book_author,
-                    "245" => "\$a " . $book_title,
-                    "500" => "\$a تم سحب التسجيلة بنجاح من الفهرس الآلي لجامعة الموصل.",
-                    "856" => "\$u " . $full_link // رابط الكتاب المباشر
-                ]
-            ];
-            $count++;
+            if ($title_node) {
+                $book_title = trim($title_node->textContent);
+                if (empty($book_title)) continue; // تجاهل الروابط الفارغة
+
+                // 2. بناء الرابط المباشر للكتاب باستخدام الـ biblionumber
+                $full_link = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-detail.pl?biblionumber=" . $bib_num;
+
+                // 3. سحب المؤلف
+                $author_node = $xpath->query('.//span[contains(@class, "author")]', $row)->item(0);
+                $book_author = $author_node ? trim(strip_tags($author_node->nodeValue)) : "مؤلف غير معروف";
+                $book_author = trim(str_replace(['بواسطة', ':', '|', 'تأليف'], '', $book_author));
+
+                $all_results[] = [
+                    "title" => $book_title,
+                    "author" => $book_author,
+                    "source" => "جامعة الموصل 📚",
+                    "marc_tags" => [
+                        "001" => $bib_num, // حفظ رقم الكتاب كتسجيلة مارك
+                        "100" => "\$a " . $book_author,
+                        "245" => "\$a " . $book_title,
+                        "500" => "\$a تم الاستخراج المباشر من الفهرس.",
+                        "856" => "\$u " . $full_link
+                    ]
+                ];
+                $count++;
+            }
         }
     }
 
