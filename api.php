@@ -18,9 +18,10 @@ if ($action == 'search') {
     $title_encoded = urlencode($title);
     
     // ==========================================
-    // المصدر: مكتبة جامعة الموصل (البحث بالبصمة الجذرية لنظام Koha)
+    // المصدر: مكتبة جامعة الموصل المركزية (البحث الدقيق بالـ XPath)
     // ==========================================
-    $search_url = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?idx=kw&q=" . $title_encoded;
+    // استخدمنا الرابط الأصلي والبارامترات اللي جبتها إنت بالضبط
+    $search_url = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/opac-search.pl?idx=&q=" . $title_encoded . "&limit=&weight_search=1";
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $search_url);
@@ -28,10 +29,11 @@ if ($action == 'search') {
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     
+    // التخفي كمتصفح حقيقي لتجاوز الحماية
     $headers = [
         'Accept: text/html,application/xhtml+xml,application/xml',
         'Accept-Language: ar,en-US;q=0.7,en;q=0.3',
-        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ];
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_TIMEOUT, 20);
@@ -43,43 +45,43 @@ if ($action == 'search') {
     if ($html && $http_code == 200) {
         $dom = new DOMDocument();
         libxml_use_internal_errors(true);
+        // إجبار النظام على قراءة الحروف العربية (UTF-8)
         @$dom->loadHTML('<?xml encoding="utf-8" ?>' . $html);
         libxml_clear_errors();
         
         $xpath = new DOMXPath($dom);
         
-        // الطريقة المدمرة: نبحث عن أي رابط يودي لتفاصيل كتاب (biblionumber)
-        $links = $xpath->query('//a[contains(@href, "biblionumber=")]');
+        // هنا سر الاختراق: بناءً على صورتك، راح نسحب كل خلية (td) تحتوي على كتاب
+        $book_nodes = $xpath->query('//td[contains(@class, "bibliocol")]');
         
-        $books_dict = []; // نستخدم مصفوفة لمنع التكرار
-        
-        foreach ($links as $link) {
-            $book_title = trim($link->textContent);
-            // نأخذ الروابط التي تحتوي على نص حقيقي (ليست صور أو أزرار فارغة)
-            if (!empty($book_title) && strlen($book_title) > 3) {
-                $href = $link->getAttribute('href');
-                if (!isset($books_dict[$href])) {
-                    $books_dict[$href] = $book_title;
-                }
-            }
-        }
-
-        // تحويل النتائج إلى شكل MARC للموبايل
         $count = 0;
-        foreach ($books_dict as $href => $book_title) {
-            if ($count >= 10) break; // ناخذ 10 نتائج
+        foreach ($book_nodes as $node) {
+            if ($count >= 10) break; // نجيب أول 10 كتب بس للسرعة
 
-            // تعديل الرابط ليكون كامل
+            // 1. سحب العنوان والرابط (من داخل div اللي اسمه title_summary مثل ما بين بالصورة)
+            $title_node = $xpath->query('.//div[contains(@class, "title_summary")]//a', $node)->item(0);
+            if (!$title_node) continue; // إذا ماكو عنوان، اعبر على البعده
+
+            $book_title = trim($title_node->textContent);
+            $href = $title_node->getAttribute('href');
             $full_link = "https://centrallibrary.uomosul.edu.iq" . (strpos($href, '/') === 0 ? $href : '/' . $href);
 
+            // 2. سحب المؤلف (من داخل span اللي اسمه author)
+            $author_node = $xpath->query('.//span[contains(@class, "author")]', $node)->item(0);
+            $book_author = $author_node ? trim(strip_tags($author_node->nodeValue)) : "مؤلف غير معروف";
+            // تنظيف اسم المؤلف من كلمات مثل (بواسطة، تأليف)
+            $book_author = trim(str_replace(['بواسطة', ':', '|'], '', $book_author));
+
+            // ترتيب البيانات للـ Flutter
             $all_results[] = [
                 "title" => $book_title,
-                "author" => "مؤلف غير معروف (بحاجة لفتح التسجيلة)",
+                "author" => $book_author,
                 "source" => "مكتبة جامعة الموصل 📚",
                 "marc_tags" => [
+                    "100" => "\$a " . $book_author,
                     "245" => "\$a " . $book_title,
-                    "500" => "\$a تم سحب التسجيلة بنجاح من الفهرس الآلي.",
-                    "856" => "\$u " . $full_link // حقل الرابط المباشر للكتاب
+                    "500" => "\$a تم سحب التسجيلة بنجاح من الفهرس الآلي لجامعة الموصل.",
+                    "856" => "\$u " . $full_link // رابط الكتاب المباشر
                 ]
             ];
             $count++;
@@ -104,7 +106,7 @@ if ($action == 'save') {
     $book_data = json_decode($json_input, true);
 
     if (!$book_data) {
-        echo json_encode(["status" => "error", "message" => "لم يتم استلام بيانات."], JSON_UNESCAPED_UNICODE);
+        echo json_encode(["status" => "error", "message" => "لم يتم استلام أي بيانات صالحة."], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
