@@ -7,7 +7,7 @@ header('Content-Type: application/json; charset=utf-8');
 $action = isset($_GET['action']) ? $_GET['action'] : 'search';
 
 // ==========================================
-// 1. قسم البحث الشامل (SRU + OAI + APIs)
+// 1. قسم البحث المخصص (جامعة الموصل فقط)
 // ==========================================
 if ($action == 'search') {
     $title = isset($_GET['title']) ? trim($_GET['title']) : '';
@@ -20,19 +20,24 @@ if ($action == 'search') {
     $all_results = [];
     $title_encoded = urlencode($title);
 
-    // --- المصدر الأول: مكتبة عربية (جامعة النجاح الوطنية - نظام Koha) عبر SRU ---
-    $sru_url = "https://maktaba.najah.edu/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=2&query=cql.anywhere=%22" . $title_encoded . "%22";
+    // =========================================================================
+    // 🔴 تنبيه هام: استبدل [MOSUL_LIBRARY_IP] بالرابط الفعلي الذي ستحصل عليه من جامعتك
+    // مثال إذا أعطوك رابط:  "http://192.168.1.50/cgi-bin/koha/sru..."
+    // =========================================================================
+   // --- المصدر الأول: بروتوكول SRU (مكتبة جامعة الموصل المركزية) ---
+    // قمنا بدمج الدومين الرسمي مع مسار SRU الخاص بنظام Koha
+    $sru_url = "https://centrallibrary.uomosul.edu.iq/cgi-bin/koha/sru?version=1.1&operation=searchRetrieve&maximumRecords=10&query=cql.anywhere=%22" . $title_encoded . "%22";
 
     $ch_sru = curl_init();
     curl_setopt($ch_sru, CURLOPT_URL, $sru_url);
     curl_setopt($ch_sru, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch_sru, CURLOPT_SSL_VERIFYPEER, false); // لتجاوز مشاكل شهادات الأمان
-    curl_setopt($ch_sru, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch_sru, CURLOPT_SSL_VERIFYPEER, false); 
+    curl_setopt($ch_sru, CURLOPT_TIMEOUT, 15);
     $sru_response = curl_exec($ch_sru);
     curl_close($ch_sru);
 
     if ($sru_response) {
-        // تنظيف ملف XML من البادئات لضمان القراءة
+        // تنظيف ملف XML من البادئات لضمان القراءة السليمة
         $clean_xml = str_replace(['zs:', 'srw:', 'marc:'], '', $sru_response);
         $clean_xml = preg_replace('/xmlns[^=]*="[^"]*"/i', '', $clean_xml);
         
@@ -55,7 +60,7 @@ if ($action == 'search') {
                     }
                 }
                 
-                // سحب الحقول المتغيرة (مع استرجاع رموز الـ Subfields)
+                // سحب الحقول المتغيرة (مع الاحتفاظ بالدولارات $a, $b, $c للتفاصيل الدقيقة)
                 if (isset($inner_record->datafield)) {
                     foreach ($inner_record->datafield as $df) {
                         $tag = (string)$df['tag'];
@@ -63,7 +68,7 @@ if ($action == 'search') {
                         
                         if (isset($df->subfield)) {
                             foreach ($df->subfield as $sf) {
-                                // سحب رمز الحقل الفرعي (a, b, c) وإضافة علامة $
+                                // سحب رمز الحقل الفرعي وإضافة علامة $
                                 $code = (string)$sf['code'];
                                 $val = (string)$sf;
                                 $field_data .= "\$$code $val  ";
@@ -72,6 +77,7 @@ if ($action == 'search') {
                         
                         $full_text = trim($field_data);
                         
+                        // ترتيب الحقول المكررة (مثل 650)
                         if (isset($marc_tags[$tag])) {
                             if (!is_array($marc_tags[$tag])) {
                                 $marc_tags[$tag] = [$marc_tags[$tag]];
@@ -81,7 +87,7 @@ if ($action == 'search') {
                             $marc_tags[$tag] = $full_text;
                         }
                         
-                        // تنظيف العنوان والمؤلف من علامة الـ $ لأغراض العرض في واجهة الموبايل فقط
+                        // تنظيف العنوان والمؤلف للواجهة الرئيسية فقط (حذف الـ $)
                         $clean_for_ui = trim(preg_replace('/\$[a-z0-9]\s*/', '', $full_text), " /:,.");
                         if ($tag == '245') $book_title = $clean_for_ui;
                         if ($tag == '100' || $tag == '111' || $tag == '700') $book_author = $clean_for_ui;
@@ -91,84 +97,8 @@ if ($action == 'search') {
                 $all_results[] = [
                     "title" => $book_title,
                     "author" => $book_author,
-                    "source" => "جامعة النجاح (Koha SRU)",
+                    "source" => "مكتبة جامعة الموصل",
                     "marc_tags" => $marc_tags
-                ];
-            }
-        }
-    }
-
-    // --- المصدر الثاني: مكتبة الإسكندرية (OAI-PMH) ---
-    $ba_url = "http://dar.bibalex.org/oai?verb=ListRecords&metadataPrefix=oai_dc";
-    $ba_xml = @simplexml_load_file($ba_url);
-    if ($ba_xml) {
-        $count = 0;
-        foreach ($ba_xml->ListRecords->record as $record) {
-            if ($count >= 2) break;
-            $metadata = $record->metadata->children('oai_dc', true)->children('dc', true);
-            if (stripos($metadata->title, $title) !== false) {
-                $all_results[] = [
-                    "title" => (string)$metadata->title,
-                    "author" => (string)$metadata->creator ?: "مؤلف غير معروف",
-                    "source" => "مكتبة الإسكندرية",
-                    "marc_tags" => [
-                        "100" => (string)$metadata->creator,
-                        "245" => (string)$metadata->title,
-                        "260" => (string)$metadata->date,
-                        "650" => (string)$metadata->subject
-                    ]
-                ];
-                $count++;
-            }
-        }
-    }
-
-    // --- المصدر الثالث: Open Library ---
-    $url_ol = "https://openlibrary.org/search.json?title=" . $title_encoded . "&limit=2";
-    $response_ol = @file_get_contents($url_ol);
-    if ($response_ol) {
-        $data_ol = json_decode($response_ol, true);
-        if (isset($data_ol['docs'])) {
-            foreach ($data_ol['docs'] as $book) {
-                $author = isset($book['author_name']) ? implode(", ", $book['author_name']) : "مؤلف غير معروف";
-                $all_results[] = [
-                    "title" => $book['title'],
-                    "author" => $author,
-                    "source" => "Open Library",
-                    "marc_tags" => [
-                        "020" => isset($book['isbn']) ? '$a ' . $book['isbn'][0] : "غير متوفر",
-                        "082" => isset($book['ddc']) ? '$a ' . $book['ddc'][0] : "غير متوفر",
-                        "100" => '$a ' . $author,
-                        "245" => '$a ' . $book['title'],
-                        "260" => isset($book['first_publish_year']) ? '$c ' . $book['first_publish_year'] : "غير محدد",
-                        "650" => isset($book['subject']) ? '$a ' . implode(" | \$a ", array_slice($book['subject'], 0, 3)) : "غير متوفر"
-                    ]
-                ];
-            }
-        }
-    }
-
-    // --- المصدر الرابع: Google Books ---
-    $url_gb = "https://www.googleapis.com/books/v1/volumes?q=intitle:" . $title_encoded . "&maxResults=2";
-    $response_gb = @file_get_contents($url_gb);
-    if ($response_gb) {
-        $data_gb = json_decode($response_gb, true);
-        if (isset($data_gb['items'])) {
-            foreach ($data_gb['items'] as $item) {
-                $book = $item['volumeInfo'];
-                $author = isset($book['authors']) ? implode(" و ", $book['authors']) : "مؤلف غير معروف";
-                $all_results[] = [
-                    "title" => isset($book['title']) ? $book['title'] : "بدون عنوان",
-                    "author" => $author,
-                    "source" => "Google Books",
-                    "marc_tags" => [
-                        "020" => isset($book['industryIdentifiers']) ? '$a ' . $book['industryIdentifiers'][0]['identifier'] : "غير متوفر",
-                        "100" => '$a ' . $author,
-                        "245" => isset($book['title']) ? '$a ' . $book['title'] : "بدون عنوان",
-                        "260" => isset($book['publishedDate']) ? '$c ' . $book['publishedDate'] : "غير محدد",
-                        "300" => isset($book['pageCount']) ? '$a ' . $book['pageCount'] . " p." : "غير محدد",
-                        "650" => isset($book['categories']) ? '$a ' . implode(" | \$a ", $book['categories']) : "غير متوفر"
-                    ]
                 ];
             }
         }
