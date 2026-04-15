@@ -19,18 +19,32 @@ $server = isset($z3950_servers[$target]) ? $z3950_servers[$target] : $z3950_serv
 
 $id = yaz_connect($server);
 if (!$id) {
-    echo json_encode(["status" => "error", "message" => "فشل الاتصال بسيرفر $server"]);
+    // 💡 الخدعة: إرسال الخطأ ككتاب وهمي ليظهر في تطبيق الفلاتر
+    echo json_encode(["status" => "success", "records" => [[
+        "title" => "⚠️ فشل الاتصال الأولي بالمكتبة",
+        "author" => "سيرفر $target مغلق أو يحظر سيرفرات Render",
+        "biblionumber" => "N/A",
+        "marc_tags" => []
+    ]]]);
     exit;
 }
 
 yaz_syntax($id, "usmarc");
-$cql_query = '@attr 1=4 "' . $query . '"';
+
+// 💡 التعديل المهم: استخدام 1016 (بحث شامل) بدل 4 (عنوان فقط)
+$cql_query = '@attr 1=1016 "' . $query . '"'; 
 yaz_search($id, "rpn", $cql_query);
 yaz_wait();
 
 $error = yaz_error($id);
 if (!empty($error)) {
-    echo json_encode(["status" => "error", "message" => "خطأ Z39.50: " . $error]);
+    // 💡 الخدعة: إرسال الخطأ ككتاب وهمي
+    echo json_encode(["status" => "success", "records" => [[
+        "title" => "⚠️ تم رفض الاتصال من قبل المكتبة",
+        "author" => $error,
+        "biblionumber" => "N/A",
+        "marc_tags" => []
+    ]]]);
     exit;
 }
 
@@ -54,29 +68,21 @@ if ($hits > 0) {
         $author = "غير معروف";
         $bibNum = "N/A";
 
-        // حقول التحكم (لا تحتوي على مؤشرات أو رموز فرعية)
         if (isset($xmlObj->controlfield)) {
             foreach ($xmlObj->controlfield as $cf) {
                 $tag = (string)$cf['tag'];
                 $val = (string)$cf;
-                $marc_fields[] = [
-                    "tag" => $tag,
-                    "ind1" => "",
-                    "ind2" => "",
-                    "subfields" => [ ["code" => "", "value" => $val] ]
-                ];
+                $marc_fields[] = ["tag" => $tag, "ind1" => "", "ind2" => "", "subfields" => [ ["code" => "", "value" => $val] ]];
                 if ($tag == '001') $bibNum = $val;
             }
         }
 
-        // حقول البيانات (تحتوي على مؤشرات ورموز فرعية)
         if (isset($xmlObj->datafield)) {
             foreach ($xmlObj->datafield as $df) {
                 $tag = (string)$df['tag'];
                 $ind1 = (string)$df['ind1'];
                 $ind2 = (string)$df['ind2'];
                 
-                // تحويل الفراغ إلى رمز الشباك المكتبي #
                 $ind1 = ($ind1 == ' ' || $ind1 == '') ? '#' : $ind1;
                 $ind2 = ($ind2 == ' ' || $ind2 == '') ? '#' : $ind2;
 
@@ -92,12 +98,7 @@ if ($hits > 0) {
                     }
                 }
                 
-                $marc_fields[] = [
-                    "tag" => $tag,
-                    "ind1" => $ind1,
-                    "ind2" => $ind2,
-                    "subfields" => $subfields
-                ];
+                $marc_fields[] = ["tag" => $tag, "ind1" => $ind1, "ind2" => $ind2, "subfields" => $subfields];
             }
         }
 
